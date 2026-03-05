@@ -401,7 +401,7 @@ class FlowSessionManager: ObservableObject {
             }
 
         case "aborted":
-            logger.info("[REC] aborted signal received, isRecording=\(isRecording)")
+            logger.info("[REC] aborted signal received, isRecording=\(self.isRecording)")
             cancelRecognition()
             isRecording = false
             isRecordingAtomic.withLock { $0 = false }
