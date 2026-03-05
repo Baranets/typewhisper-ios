@@ -227,6 +227,33 @@ final class RecordingViewModel: ObservableObject {
         lastResult = ""
     }
 
+    // MARK: - Intent Support
+
+    var lastTranscriptionDuration: TimeInterval? {
+        recordingDuration > 0 ? recordingDuration : nil
+    }
+
+    func applyIntentOverrides(language: String?, translationTarget: String?) {
+        // Settings are already applied by IntentFacade via settingsViewModel
+    }
+
+    func resetIntentOverrides() {
+        // No persistent overrides to reset
+    }
+
+    func waitForFinalState(timeout: Duration = .seconds(20)) async -> State {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            switch state {
+            case .done, .error, .idle:
+                return state
+            case .recording, .processing:
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        return state
+    }
+
     // MARK: - Effective Settings
 
     private var effectiveLanguage: String? {

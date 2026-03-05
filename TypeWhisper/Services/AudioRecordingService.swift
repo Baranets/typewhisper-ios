@@ -29,6 +29,8 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
     @Published private(set) var silenceDuration: TimeInterval = 0
     @Published var didAutoStop: Bool = false
 
+    let recordingDeviceEvent = PassthroughSubject<RecordingDeviceEvent, Never>()
+
     var silenceThreshold: Float = 0.01
     var silenceAutoStopDuration: TimeInterval = 0
     var gainMultiplier: Float = 1.0
@@ -38,11 +40,32 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
     private let bufferLock = NSLock()
     private var silenceStart: Date?
     private let processingQueue = DispatchQueue(label: "com.typewhisper.audio-processing", qos: .userInteractive)
+    private var routeCancellable: AnyCancellable?
+    private var routeCoordinator: AudioRouteCoordinator?
+    private var isFlowSessionActiveProvider: (() -> Bool)?
 
     static let targetSampleRate: Double = 16000
 
     var hasMicrophonePermission: Bool {
         AVAudioSession.sharedInstance().recordPermission == .granted
+    }
+
+    func configureRouteCoordinator(_ coordinator: AudioRouteCoordinator) {
+        routeCoordinator = coordinator
+        routeCancellable = coordinator.eventPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                guard let self else { return }
+                self.recordingDeviceEvent.send(event)
+                if self.isRecording {
+                    self.rebuildTapForCurrentRoute()
+                }
+            }
+        coordinator.beginObserving()
+    }
+
+    func setFlowSessionActiveProvider(_ provider: @escaping () -> Bool) {
+        isFlowSessionActiveProvider = provider
     }
 
     func requestMicrophonePermission() async -> Bool {
@@ -55,7 +78,7 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
                 }
             }
         }
-        // .denied — open Settings
+
         await MainActor.run {
             if let url = URL(string: UIApplication.openSettingsURLString) {
                 UIApplication.shared.open(url)
@@ -76,32 +99,26 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
             throw AudioRecordingError.microphonePermissionDenied
         }
 
-        // Configure audio session for recording
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .duckOthers])
-        try session.setActive(true)
+        if isFlowSessionActiveProvider?() == true {
+            throw AudioRecordingError.engineStartFailed("Flow session is active")
+        }
+
+        let bluetoothRoutingEnabled = UserDefaults.standard.object(forKey: "bluetoothRoutingEnabled") as? Bool ?? true
+        let preferVoiceIsolation = UserDefaults.standard.object(forKey: "preferVoiceIsolation") as? Bool ?? true
+
+        if let routeCoordinator {
+            try routeCoordinator.configureSession(
+                bluetoothRoutingEnabled: bluetoothRoutingEnabled,
+                preferVoiceIsolation: preferVoiceIsolation
+            )
+        } else {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .duckOthers])
+            try session.setActive(true)
+        }
 
         let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-
-        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            throw AudioRecordingError.engineStartFailed("No audio input available")
-        }
-
-        guard let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: Self.targetSampleRate,
-            channels: 1,
-            interleaved: false
-        ) else {
-            throw AudioRecordingError.engineStartFailed("Cannot create target audio format")
-        }
-
-        let converter = AVAudioConverter(from: inputFormat, to: targetFormat)
-        guard let converter else {
-            throw AudioRecordingError.engineStartFailed("Cannot create audio converter")
-        }
+        try installTapAndStart(on: engine)
 
         bufferLock.lock()
         sampleBuffer.removeAll()
@@ -111,18 +128,6 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
         isSilent = false
         silenceDuration = 0
         didAutoStop = false
-
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-            self?.processAudioBuffer(buffer, converter: converter, targetFormat: targetFormat)
-        }
-
-        do {
-            try engine.start()
-        } catch {
-            inputNode.removeTap(onBus: 0)
-            throw AudioRecordingError.engineStartFailed(error.localizedDescription)
-        }
-
         audioEngine = engine
         isRecording = true
     }
@@ -144,12 +149,62 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
         sampleBuffer.removeAll()
         bufferLock.unlock()
 
-        // Deactivate audio session after engine is fully stopped
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.3) {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.routeCoordinator?.deactivateSession()
+            if self?.routeCoordinator == nil {
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
         }
 
         return samples
+    }
+
+    private func installTapAndStart(on engine: AVAudioEngine) throws {
+        let inputNode = engine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+            throw AudioRecordingError.engineStartFailed("No audio input available")
+        }
+
+        guard let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: Self.targetSampleRate,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw AudioRecordingError.engineStartFailed("Cannot create target audio format")
+        }
+
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            throw AudioRecordingError.engineStartFailed("Cannot create audio converter")
+        }
+
+        inputNode.removeTap(onBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+            self?.processAudioBuffer(buffer, converter: converter, targetFormat: targetFormat)
+        }
+
+        do {
+            if !engine.isRunning {
+                try engine.start()
+            }
+        } catch {
+            inputNode.removeTap(onBus: 0)
+            throw AudioRecordingError.engineStartFailed(error.localizedDescription)
+        }
+    }
+
+    private func rebuildTapForCurrentRoute() {
+        guard let engine = audioEngine else { return }
+
+        engine.pause()
+        engine.inputNode.removeTap(onBus: 0)
+        do {
+            try installTapAndStart(on: engine)
+        } catch {
+            // Keep recording session alive even if one rebuild fails.
+        }
     }
 
     private func processAudioBuffer(

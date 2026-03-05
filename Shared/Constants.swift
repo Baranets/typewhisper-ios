@@ -22,5 +22,9 @@ enum TypeWhisperConstants {
         static let transcriptionError = "transcriptionError"
         static let audioLevels = "audioLevels"
         static let selectedProfileId = "selectedProfileId"
+
+        // Focus Mode keys
+        static let focusRuntimeConfiguration = "focusRuntimeConfiguration"
+        static let focusProfileMappings = "focusProfileMappings"
     }
 }

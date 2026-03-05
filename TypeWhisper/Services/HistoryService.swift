@@ -5,6 +5,7 @@ import Combine
 @MainActor
 final class HistoryService: ObservableObject {
     @Published private(set) var records: [TranscriptionRecord] = []
+    var lastRecord: TranscriptionRecord? { records.first }
 
     private let modelContainer: ModelContainer
     private let modelContext: ModelContext
