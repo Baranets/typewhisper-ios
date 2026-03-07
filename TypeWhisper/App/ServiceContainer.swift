@@ -87,6 +87,7 @@ final class ServiceContainer: ObservableObject {
     }
 
     func initialize() async {
+        historyService.importKeyboardHistory()
         historyService.purgeOldRecords()
         await modelManagerService.loadAllSavedModels()
     }

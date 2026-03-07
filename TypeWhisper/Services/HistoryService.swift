@@ -106,6 +106,48 @@ final class HistoryService: ObservableObject {
         fetchRecords()
     }
 
+    func importKeyboardHistory() {
+        guard let groupURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: TypeWhisperConstants.appGroupIdentifier) else { return }
+
+        let fileURL = groupURL.appending(path: TypeWhisperConstants.SharedFiles.keyboardHistoryFile)
+        guard let data = try? Data(contentsOf: fileURL),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: String]],
+              !entries.isEmpty else { return }
+
+        let formatter = ISO8601DateFormatter()
+        let existingIds = Set(records.map { $0.id })
+
+        var imported = 0
+        for entry in entries {
+            guard let idString = entry["id"],
+                  let id = UUID(uuidString: idString),
+                  !existingIds.contains(id),
+                  let finalText = entry["finalText"],
+                  !finalText.isEmpty else { continue }
+
+            let record = TranscriptionRecord(
+                id: id,
+                timestamp: entry["timestamp"].flatMap { formatter.date(from: $0) } ?? Date(),
+                rawText: entry["rawText"] ?? finalText,
+                finalText: finalText,
+                appName: "Keyboard",
+                durationSeconds: 0,
+                language: entry["language"],
+                engineUsed: "keyboard"
+            )
+            modelContext.insert(record)
+            imported += 1
+        }
+
+        if imported > 0 {
+            save()
+            fetchRecords()
+        }
+
+        // Clear file after successful import
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
     private func fetchRecords() {
         let descriptor = FetchDescriptor<TranscriptionRecord>(
             sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
