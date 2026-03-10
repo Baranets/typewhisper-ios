@@ -115,6 +115,7 @@ struct LongPressKeyView: View {
                     holdTimer?.invalidate()
                     holdTimer = nil
                     AudioServicesPlaySystemSound(1104)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     if holdFired {
                         if let selected = popupCoordinator.dismiss() {
                             onInsert(selected)
@@ -212,6 +213,7 @@ struct RepeatDeleteKeyView: View {
                     isPressed = true
                     deleteCount = 0
                     AudioServicesPlaySystemSound(1155)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     onDelete()
                     holdTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { _ in
                         Task { @MainActor in

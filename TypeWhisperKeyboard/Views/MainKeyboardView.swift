@@ -489,6 +489,7 @@ struct MainKeyboardView: View {
     ) -> some View {
         Button {
             AudioServicesPlaySystemSound(kind == .special ? 1156 : 1104)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
             action()
         } label: {
             label()
