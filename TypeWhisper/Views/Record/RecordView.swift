@@ -134,7 +134,7 @@ struct RecordView: View {
                     .foregroundStyle(.secondary)
                 Text("Enable Keyboard")
                     .font(.headline)
-                Text("Go to Settings \u{2192} Keyboards \u{2192} TypeWhisper")
+                Text("Settings > General > Keyboard > Keyboards > Add New Keyboard > TypeWhisper")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -154,7 +154,7 @@ struct RecordView: View {
                     .foregroundStyle(.secondary)
                 Text("Allow Full Access")
                     .font(.headline)
-                Text("Required for speech recognition")
+                Text("Settings > General > Keyboard > Keyboards > TypeWhisper > Allow Full Access")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -190,7 +190,7 @@ struct RecordView: View {
         VStack(spacing: 16) {
             ProgressView()
                 .controlSize(.large)
-            Text("Transcribing...")
+            Text(viewModel.processingLabel)
                 .font(.headline)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -206,9 +206,13 @@ struct RecordView: View {
     }
 
     private func checkKeyboardSetup() {
+        if let keyboards = UserDefaults.standard.object(forKey: "AppleKeyboards") as? [String],
+           keyboards.contains(TypeWhisperConstants.keyboardBundleId) {
+            keyboardActivated = true
+        } else {
+            keyboardActivated = false
+        }
         guard let defaults = UserDefaults(suiteName: TypeWhisperConstants.appGroupIdentifier) else { return }
-        let lastChecked = defaults.double(forKey: TypeWhisperConstants.SharedDefaults.keyboardLastCheckedAt)
-        keyboardActivated = lastChecked > 0
         keyboardHasFullAccess = defaults.bool(forKey: TypeWhisperConstants.SharedDefaults.keyboardHasFullAccess)
     }
 }

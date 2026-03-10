@@ -1,6 +1,9 @@
 import Foundation
 import Combine
 import UIKit
+import os
+
+private let logger = Logger(subsystem: "com.typewhisper.typewhisper-app", category: "Recording")
 
 @MainActor
 final class RecordingViewModel: ObservableObject {
@@ -26,6 +29,7 @@ final class RecordingViewModel: ObservableObject {
     @Published var partialText: String = ""
     @Published var isStreaming: Bool = false
     @Published var lastResult: String = ""
+    @Published var processingLabel: String = "Transcribing..."
     @Published var whisperModeEnabled: Bool {
         didSet { UserDefaults.standard.set(whisperModeEnabled, forKey: "whisperModeEnabled") }
     }
@@ -152,27 +156,35 @@ final class RecordingViewModel: ObservableObject {
         let task = effectiveTask
         let translationTarget = effectiveTranslationTarget
 
+        processingLabel = "Transcribing..."
         state = .processing
 
         Task {
             do {
+                await awaitStreamingStop()
+                logger.info("Transcribing: lang=\(language ?? "auto"), task=\(String(describing: task)), translationTarget=\(translationTarget ?? "none"), samples=\(samples.count)")
                 let result = try await modelManager.transcribe(
                     audioSamples: samples,
                     language: language,
                     task: task
                 )
+                logger.info("Transcription done: \(result.text.prefix(80)), engine=\(result.engineUsed.rawValue), detected=\(result.detectedLanguage ?? "nil")")
 
                 var text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else {
+                    logger.warning("Transcription returned empty text")
                     state = .idle
                     partialText = ""
                     return
                 }
 
                 if let targetCode = translationTarget {
+                    processingLabel = "Translating..."
+                    logger.info("Starting translation to \(targetCode)")
                     let target = Locale.Language(identifier: targetCode)
                     let source = (result.detectedLanguage ?? language).map { Locale.Language(identifier: $0) }
                     text = try await translationService.translate(text: text, from: source, to: target)
+                    logger.info("Translation done: \(text.prefix(80))")
                 }
 
                 // Post-processing pipeline
@@ -194,8 +206,10 @@ final class RecordingViewModel: ObservableObject {
                 )
 
                 soundService.play(.transcriptionSuccess, enabled: soundFeedbackEnabled)
+                logger.info("Done, state -> .done")
                 state = .done(text)
             } catch {
+                logger.error("Transcription pipeline failed: \(error.localizedDescription)")
                 soundService.play(.error, enabled: soundFeedbackEnabled)
                 showError(error.localizedDescription)
             }
@@ -330,9 +344,15 @@ final class RecordingViewModel: ObservableObject {
 
     private func stopStreaming() {
         streamingTask?.cancel()
-        streamingTask = nil
         isStreaming = false
         confirmedStreamingText = ""
+    }
+
+    private func awaitStreamingStop() async {
+        if let task = streamingTask {
+            _ = await task.value
+            streamingTask = nil
+        }
     }
 
     nonisolated private static func stabilizeText(confirmed: String, new: String) -> String {

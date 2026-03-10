@@ -107,10 +107,10 @@ class FlowSessionManager: ObservableObject {
     @Published var isRecording = false
     @Published var lastTranscription: String?
     @Published var openedFromKeyboard = false
-
     private var audioEngine: AVAudioEngine?
     private var sessionTimer: Timer?
     private var pollingTimer: Timer?
+    private var heartbeatTimer: Timer?
 
     private let isRecordingAtomic = OSAllocatedUnfairLock(initialState: false)
     private let recognitionState = FlowRecognitionState()
@@ -141,7 +141,7 @@ class FlowSessionManager: ObservableObject {
     // MARK: - Session Lifecycle
 
     func startFlowSession(duration: TimeInterval = 300) {
-        logger.info("Starting Flow Session for \(duration) seconds")
+        logger.info("Starting Flow Session for \(Int(duration))s")
 
         let audioSession = AVAudioSession.sharedInstance()
         do {
@@ -165,6 +165,7 @@ class FlowSessionManager: ObservableObject {
 
         startContinuousRecording()
         startPollingForKeyboardSignals()
+        startHeartbeat()
 
         let expiresAt = Date().addingTimeInterval(duration)
         sessionExpiresAt = expiresAt
@@ -191,6 +192,9 @@ class FlowSessionManager: ObservableObject {
         sessionTimer = nil
         pollingTimer?.invalidate()
         pollingTimer = nil
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        sharedDefaults?.removeObject(forKey: TypeWhisperConstants.SharedDefaults.flowHeartbeat)
 
         // Cancel any active recognition
         cancelRecognition()
@@ -258,6 +262,14 @@ class FlowSessionManager: ObservableObject {
 
     private func startRecognition() {
         cancelRecognition()
+
+        // Small delay to let SFSpeechRecognizer fully release previous session
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.startRecognitionNow()
+        }
+    }
+
+    private func startRecognitionNow() {
         recognitionGeneration += 1
         let currentGeneration = recognitionGeneration
         logger.info("[REC] startRecognition gen=\(currentGeneration)")
@@ -293,22 +305,24 @@ class FlowSessionManager: ObservableObject {
 
                 // Ignore callbacks from stale recognition sessions
                 guard self.recognitionGeneration == currentGeneration else {
-                    self.logger.info("[REC] STALE callback gen=\(currentGeneration) current=\(self.recognitionGeneration)")
+                    self.logger.warning("[REC] STALE callback gen=\(currentGeneration) current=\(self.recognitionGeneration)")
                     return
                 }
 
-                let hasResult = result != nil
-                let isFinal = result?.isFinal ?? false
-                let hasError = error != nil
-                self.logger.info("[REC] callback gen=\(currentGeneration) result=\(hasResult) isFinal=\(isFinal) error=\(hasError) err=\(error?.localizedDescription ?? "none")")
-
-                self.recognitionTimeoutWork?.cancel()
-                self.recognitionTimeoutWork = nil
+                self.logger.info("[REC] callback gen=\(currentGeneration) result=\(result != nil) final=\(result?.isFinal ?? false) err=\(error?.localizedDescription ?? "none")")
 
                 // Check result FIRST - SFSpeechRecognizer can deliver both result and error
                 if let result, result.isFinal {
                     let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self.logger.info("Transcription result: \(text)")
+                    self.logger.info("[REC] FINAL: \(text.prefix(80))")
+
+                    // Immediately block any further callbacks from this session
+                    self.recognitionGeneration += 1
+                    self.recognitionTimeoutWork?.cancel()
+                    self.recognitionTimeoutWork = nil
+                    self.recognitionTask?.cancel()
+                    self.recognitionTask = nil
+                    self.recognitionState.set(nil)
 
                     if text.isEmpty {
                         self.sharedDefaults?.set("No text recognized", forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
@@ -319,33 +333,45 @@ class FlowSessionManager: ObservableObject {
                     }
                     self.sharedDefaults?.set("idle", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
                     self.sharedDefaults?.synchronize()
-                    self.recognitionState.set(nil)
-                    self.recognitionTask = nil
                 } else if let error {
-                    self.logger.error("Recognition error: \(error.localizedDescription)")
-                    self.isRecording = false
-                    self.isRecordingAtomic.withLock { $0 = false }
+                    // Ignore cancellation errors from our own cleanup
+                    let nsError = error as NSError
+                    if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 216 {
+                        self.logger.info("[REC] Ignoring cancellation error (216)")
+                        return
+                    }
+
+                    self.logger.error("[REC] ERROR: \(error.localizedDescription) (isRecording=\(self.isRecording))")
+                    self.recognitionTimeoutWork?.cancel()
+                    self.recognitionTimeoutWork = nil
+                    self.recognitionTask = nil
+                    self.recognitionState.set(nil)
+
+                    // Write error so keyboard can pick it up - but DON'T reset isRecording.
+                    // If keyboard is still recording, it will stop and find this error.
+                    // If already stopped, "stopped" handler will respond.
                     self.sharedDefaults?.set(error.localizedDescription, forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
                     self.sharedDefaults?.set("idle", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
                     self.sharedDefaults?.synchronize()
-                    self.recognitionState.set(nil)
-                    self.recognitionTask = nil
                 }
             }
         }
 
-        logger.info("Recognition started (language: \(effectiveLanguage ?? "auto"))")
+        logger.info("[REC] Recognition started (lang: \(effectiveLanguage ?? "auto"))")
     }
 
     private func stopRecognition() {
         // End the audio stream — recognizer will produce final result via callback
+        let hasRequest = recognitionState.request != nil
+        let hasTask = recognitionTask != nil
+        logger.info("[REC] stopRecognition: hasRequest=\(hasRequest), hasTask=\(hasTask)")
         recognitionState.request?.endAudio()
 
         // Timeout after 30s if no result
         let timeout = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self, self.recognitionTask != nil else { return }
-                self.logger.warning("Recognition timed out")
+                self.logger.warning("[REC] TIMEOUT - recognition timed out after 30s")
                 self.recognitionTask?.cancel()
                 self.recognitionTask = nil
                 self.recognitionState.set(nil)
@@ -383,25 +409,38 @@ class FlowSessionManager: ObservableObject {
             if !isRecording {
                 isRecording = true
                 isRecordingAtomic.withLock { $0 = true }
+
+                // Clean up stale data from previous recognition
+                sharedDefaults?.removeObject(forKey: TypeWhisperConstants.SharedDefaults.transcriptionResult)
+                sharedDefaults?.removeObject(forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
+                sharedDefaults?.synchronize()
+
+                logger.info("[FLOW] signal=recording, starting recognition (task=\(String(describing: self.recognitionTask)))")
                 startRecognition()
-                logger.info("Keyboard started recording")
             }
 
         case "stopped":
-            if isRecording {
-                isRecording = false
-                isRecordingAtomic.withLock { $0 = false }
-                let buffers = recognitionState.bufferCount
-                logger.info("[REC] stopped - buffers=\(buffers), calling stopRecognition")
+            let buffers = recognitionState.bufferCount
+            logger.info("[FLOW] signal=stopped isRecording=\(self.isRecording) buffers=\(buffers) task=\(self.recognitionTask != nil)")
 
-                sharedDefaults?.set("processing", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
-                sharedDefaults?.synchronize()
+            isRecording = false
+            isRecordingAtomic.withLock { $0 = false }
 
+            sharedDefaults?.set("processing", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
+            sharedDefaults?.synchronize()
+
+            if recognitionTask != nil || recognitionState.request != nil {
                 stopRecognition()
+            } else {
+                // No active recognition - respond immediately so keyboard doesn't hang
+                logger.warning("[FLOW] stopped but no active recognition - responding with error")
+                sharedDefaults?.set("Recognition not active", forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
+                sharedDefaults?.set("idle", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
+                sharedDefaults?.synchronize()
             }
 
         case "aborted":
-            logger.info("[REC] aborted signal received, isRecording=\(self.isRecording)")
+            logger.info("[FLOW] signal=aborted isRecording=\(self.isRecording)")
             cancelRecognition()
             isRecording = false
             isRecordingAtomic.withLock { $0 = false }
@@ -411,6 +450,20 @@ class FlowSessionManager: ObservableObject {
         default:
             break
         }
+    }
+
+    // MARK: - Heartbeat
+
+    private func startHeartbeat() {
+        heartbeatTimer?.invalidate()
+        writeHeartbeat()
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.writeHeartbeat()
+        }
+    }
+
+    private func writeHeartbeat() {
+        sharedDefaults?.set(Date(), forKey: TypeWhisperConstants.SharedDefaults.flowHeartbeat)
     }
 
     // MARK: - URL Handling

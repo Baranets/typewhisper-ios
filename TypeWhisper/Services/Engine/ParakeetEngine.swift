@@ -1,5 +1,8 @@
 import Foundation
 import FluidAudio
+import os
+
+private let logger = Logger(subsystem: "com.typewhisper.typewhisper-app", category: "Parakeet")
 
 final class ParakeetEngine: TranscriptionEngine, @unchecked Sendable {
     let engineType: EngineType = .parakeet
@@ -74,9 +77,12 @@ final class ParakeetEngine: TranscriptionEngine, @unchecked Sendable {
         let startTime = CFAbsoluteTimeGetCurrent()
         let audioDuration = Double(audioSamples.count) / 16000.0
 
+        logger.info("Transcribing \(audioSamples.count) samples (\(String(format: "%.1f", audioDuration))s audio), lang=\(language ?? "auto")")
+        try await asrManager.resetDecoderState(for: .system)
         let result = try await asrManager.transcribe(audioSamples, source: .system)
 
         let processingTime = CFAbsoluteTimeGetCurrent() - startTime
+        logger.info("Parakeet done in \(String(format: "%.2f", processingTime))s: \(result.text.prefix(80))")
 
         var segments: [TranscriptionSegment] = []
         if let tokenTimings = result.tokenTimings, !tokenTimings.isEmpty {

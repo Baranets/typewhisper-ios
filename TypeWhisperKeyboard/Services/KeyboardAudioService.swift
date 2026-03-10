@@ -12,12 +12,24 @@ class KeyboardAudioService {
 
     init() {}
 
-    /// Check if a Flow Session is currently active
+    /// Check if a Flow Session is currently active AND the main app is alive
     var isFlowSessionActive: Bool {
-        guard let expires = sharedDefaults?.object(forKey: TypeWhisperConstants.SharedDefaults.flowSessionExpires) as? Date else {
+        guard let expires = sharedDefaults?.object(forKey: TypeWhisperConstants.SharedDefaults.flowSessionExpires) as? Date,
+              expires > Date() else {
             return false
         }
-        return expires > Date()
+
+        // Check heartbeat - main app writes Date() every 1s during active session
+        guard let heartbeat = sharedDefaults?.object(forKey: TypeWhisperConstants.SharedDefaults.flowHeartbeat) as? Date else {
+            return false
+        }
+        let staleness = Date().timeIntervalSince(heartbeat)
+        if staleness > 3.0 {
+            logger.warning("Flow heartbeat stale by \(String(format: "%.1f", staleness))s - main app likely killed")
+            return false
+        }
+
+        return true
     }
 
     /// Signal the main app to start recording

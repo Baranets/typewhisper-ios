@@ -2,6 +2,7 @@ import Foundation
 
 enum TypeWhisperConstants {
     static let appGroupIdentifier = "group.com.typewhisper.shared"
+    static let keyboardBundleId = "com.typewhisper.typewhisper-app.keyboard"
 
     enum SharedFiles {
         static let keyboardHistoryFile = "keyboard_history.json"
@@ -22,6 +23,9 @@ enum TypeWhisperConstants {
         static let transcriptionError = "transcriptionError"
         static let audioLevels = "audioLevels"
         static let selectedProfileId = "selectedProfileId"
+
+        // Heartbeat
+        static let flowHeartbeat = "flowHeartbeat"
 
         // Focus Mode keys
         static let focusRuntimeConfiguration = "focusRuntimeConfiguration"

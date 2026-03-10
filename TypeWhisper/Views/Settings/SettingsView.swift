@@ -124,9 +124,13 @@ struct SettingsView: View {
     }
 
     private func checkKeyboardSetup() {
+        if let keyboards = UserDefaults.standard.object(forKey: "AppleKeyboards") as? [String],
+           keyboards.contains(TypeWhisperConstants.keyboardBundleId) {
+            keyboardActivated = true
+        } else {
+            keyboardActivated = false
+        }
         guard let defaults = UserDefaults(suiteName: TypeWhisperConstants.appGroupIdentifier) else { return }
-        let lastChecked = defaults.double(forKey: TypeWhisperConstants.SharedDefaults.keyboardLastCheckedAt)
-        keyboardActivated = lastChecked > 0
         keyboardHasFullAccess = defaults.bool(forKey: TypeWhisperConstants.SharedDefaults.keyboardHasFullAccess)
     }
 }

@@ -23,6 +23,13 @@ final class AudioFileService: Sendable {
     ]
 
     func loadAudioSamples(from url: URL) async throws -> [Float] {
+        let didStartAccessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccessing {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw AudioFileError.fileNotFound
         }

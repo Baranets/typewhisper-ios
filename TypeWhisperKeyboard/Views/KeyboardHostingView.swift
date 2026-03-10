@@ -30,8 +30,13 @@ struct KeyboardHostingView: View {
                 theme: theme
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .translationTask(viewModel.translationConfig) { session in
-                await viewModel.handleTranslation(session)
+            .overlay {
+                Color.clear
+                    .frame(width: 0, height: 0)
+                    .translationTask(viewModel.translationConfig) { session in
+                        await viewModel.handleTranslation(session)
+                    }
+                    .id(viewModel.translationRequestId)
             }
             .onAppear {
                 viewModel.insertTextHandler = { text in
@@ -69,6 +74,7 @@ class KeyboardViewModel: ObservableObject {
     @Published var availableProfiles: [KeyboardProfileDTO] = []
     @Published var selectedProfileId: UUID?
     @Published var translationConfig: TranslationSession.Configuration?
+    @Published var translationRequestId: Int = 0
     private var pendingTranslationText: String?
 
     private var audioService: KeyboardAudioService?
@@ -236,9 +242,11 @@ class KeyboardViewModel: ObservableObject {
             return
         }
 
+        logger.info("stopRecording: polling for result...")
         service.stopRecording { [weak self] result, errorMsg in
             Task { @MainActor in
                 guard let self = self else { return }
+                logger.info("poll complete: result=\(result?.prefix(40) ?? "nil") error=\(errorMsg ?? "nil")")
                 self.isProcessing = false
                 self.audioLevels = Array(repeating: 0, count: 24)
 
@@ -247,6 +255,7 @@ class KeyboardViewModel: ObservableObject {
                 } else {
                     self.error = errorMsg ?? L10n.noTranscription
                     self.bannerMessage = self.error
+                    logger.warning("no result, showing error: \(self.error ?? "")")
                 }
             }
         }
@@ -291,11 +300,12 @@ class KeyboardViewModel: ObservableObject {
         guard let service = audioService else { return }
 
         if let errorMsg = service.startRecording() {
-            logger.warning("Flow recording start failed: \(errorMsg)")
+            logger.error("startFlowRecording FAILED: \(errorMsg)")
             triggerFlowFallback(message: L10n.flowSessionCouldNotStart)
             return
         }
 
+        logger.info("startFlowRecording OK")
         isRecording = true
         bannerMessage = nil
         isFlowSessionActive = true
@@ -406,23 +416,45 @@ class KeyboardViewModel: ObservableObject {
         if let profileId = selectedProfileId,
            let profile = availableProfiles.first(where: { $0.id == profileId }),
            let targetLang = profile.translationTargetLanguage {
+            logger.info("handleResult: translating to \(targetLang), text=\(text.prefix(40))")
             pendingTranslationText = text
             let sourceLang = profile.inputLanguage.flatMap { Locale.Language(identifier: $0) }
             let targetLanguage = Locale.Language(identifier: targetLang)
+            translationRequestId += 1
+            let reqId = translationRequestId
             translationConfig = .init(source: sourceLang, target: targetLanguage)
             isProcessing = true
+            logger.info("translationConfig set, requestId=\(reqId), waiting for .translationTask")
+
+            // Safety timeout - if .translationTask doesn't fire within 5s, insert raw text
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(5))
+                guard self.isProcessing, self.translationRequestId == reqId else { return }
+                logger.warning("translation timeout after 5s, inserting raw text")
+                self.insertTextHandler?(text)
+                self.saveToKeyboardHistory(rawText: text, finalText: text)
+                self.isProcessing = false
+                self.pendingTranslationText = nil
+                self.translationConfig = nil
+            }
             return
         }
 
+        logger.info("handleResult: inserting text directly (no translation)")
         self.insertTextHandler?(text)
         self.saveToKeyboardHistory(rawText: text, finalText: text)
     }
 
     func handleTranslation(_ session: sending TranslationSession) async {
-        guard let text = pendingTranslationText else { return }
+        guard let text = pendingTranslationText else {
+            await MainActor.run { logger.warning("handleTranslation: no pending text!") }
+            return
+        }
+        await MainActor.run { logger.info("handleTranslation: translating '\(text.prefix(40))'") }
         do {
             let result = try await session.translate(text)
             await MainActor.run {
+                logger.info("translation done: \(result.targetText.prefix(40))")
                 self.insertTextHandler?(result.targetText)
                 self.saveToKeyboardHistory(rawText: text, finalText: result.targetText)
                 self.isProcessing = false
@@ -430,8 +462,8 @@ class KeyboardViewModel: ObservableObject {
                 self.translationConfig = nil
             }
         } catch {
-            logger.error("Translation failed: \(error.localizedDescription)")
             await MainActor.run {
+                logger.error("translation FAILED: \(error.localizedDescription)")
                 self.insertTextHandler?(text)
                 self.saveToKeyboardHistory(rawText: text, finalText: text)
                 self.isProcessing = false
