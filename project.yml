@@ -39,6 +39,22 @@ targets:
       - package: WhisperKit
       - package: FluidAudio
       - target: TypeWhisperKeyboard
+      - target: TypeWhisperWidget
+
+  TypeWhisperWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: TypeWhisperWidget
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.typewhisper.typewhisper-app.widget
+        INFOPLIST_FILE: TypeWhisperWidget/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: TypeWhisperWidget/TypeWhisperWidget.entitlements
+        MARKETING_VERSION: 0.1
+        CURRENT_PROJECT_VERSION: 1
+        SKIP_INSTALL: true
 
   TypeWhisperKeyboard:
     type: app-extension
@@ -61,6 +77,7 @@ schemes:
       targets:
         TypeWhisper: all
         TypeWhisperKeyboard: all
+        TypeWhisperWidget: all
     run:
       config: Debug
     test:

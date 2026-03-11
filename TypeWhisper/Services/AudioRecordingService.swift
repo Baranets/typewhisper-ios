@@ -24,6 +24,7 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
     }
 
     @Published private(set) var isRecording = false
+    @Published private(set) var isPaused = false
     @Published private(set) var audioLevel: Float = 0
     @Published private(set) var isSilent: Bool = false
     @Published private(set) var silenceDuration: TimeInterval = 0
@@ -136,6 +137,7 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
         let engine = audioEngine
         audioEngine = nil
         isRecording = false
+        isPaused = false
         audioLevel = 0
         isSilent = false
         silenceDuration = 0
@@ -149,14 +151,68 @@ final class AudioRecordingService: ObservableObject, @unchecked Sendable {
         sampleBuffer.removeAll()
         bufferLock.unlock()
 
+        deactivateSessionAsync()
+
+        return samples
+    }
+
+    func pauseRecording() {
+        guard isRecording, !isPaused else { return }
+        audioEngine?.pause()
+        silenceStart = nil
+        isSilent = false
+        silenceDuration = 0
+        isPaused = true
+    }
+
+    func resumeRecording() {
+        guard isRecording, isPaused else { return }
+        try? audioEngine?.start()
+        isPaused = false
+    }
+
+    func cancelRecording() {
+        let engine = audioEngine
+        audioEngine = nil
+        isRecording = false
+        isPaused = false
+        audioLevel = 0
+        isSilent = false
+        silenceDuration = 0
+        silenceStart = nil
+
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+
+        bufferLock.lock()
+        sampleBuffer.removeAll()
+        bufferLock.unlock()
+
+        deactivateSessionAsync()
+    }
+
+    func restartRecording() {
+        bufferLock.lock()
+        sampleBuffer.removeAll()
+        bufferLock.unlock()
+
+        silenceStart = nil
+        isSilent = false
+        silenceDuration = 0
+
+        if isPaused {
+            try? audioEngine?.start()
+            isPaused = false
+        }
+    }
+
+    private func deactivateSessionAsync() {
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.routeCoordinator?.deactivateSession()
             if self?.routeCoordinator == nil {
                 try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             }
         }
-
-        return samples
     }
 
     private func installTapAndStart(on engine: AVAudioEngine) throws {

@@ -77,6 +77,7 @@ jobs:
         env:
           APP_PROFILE_BASE64: ${{ secrets.IOS_APP_PROVISIONING_PROFILE }}
           KEYBOARD_PROFILE_BASE64: ${{ secrets.IOS_KEYBOARD_PROVISIONING_PROFILE }}
+          WIDGET_PROFILE_BASE64: ${{ secrets.IOS_WIDGET_PROVISIONING_PROFILE }}
         run: |
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
 
@@ -99,6 +100,16 @@ jobs:
           cp "$KB_PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"$KB_PROFILE_UUID.mobileprovision"
           echo "KB_PROFILE_NAME=$KB_PROFILE_NAME" >> $GITHUB_ENV
           echo "Installed keyboard profile: $KB_PROFILE_NAME ($KB_PROFILE_UUID)"
+
+          # Widget extension profile
+          WG_PROFILE_PATH="$RUNNER_TEMP/widget_profile.mobileprovision"
+          echo "$WIDGET_PROFILE_BASE64" | base64 --decode > "$WG_PROFILE_PATH"
+          /usr/bin/security cms -D -i "$WG_PROFILE_PATH" > "$RUNNER_TEMP/wg_profile.plist"
+          WG_PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" "$RUNNER_TEMP/wg_profile.plist")
+          WG_PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$RUNNER_TEMP/wg_profile.plist")
+          cp "$WG_PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"$WG_PROFILE_UUID.mobileprovision"
+          echo "WG_PROFILE_NAME=$WG_PROFILE_NAME" >> $GITHUB_ENV
+          echo "Installed widget profile: $WG_PROFILE_NAME ($WG_PROFILE_UUID)"
 
       - name: Archive
         run: |
@@ -132,6 +143,8 @@ jobs:
               <string>${APP_PROFILE_NAME}</string>
               <key>com.typewhisper.typewhisper-app.keyboard</key>
               <string>${KB_PROFILE_NAME}</string>
+              <key>com.typewhisper.typewhisper-app.widget</key>
+              <string>${WG_PROFILE_NAME}</string>
             </dict>
             <key>signingCertificate</key>
             <string>Apple Distribution</string>
@@ -179,5 +192,6 @@ jobs:
           rm -f "$RUNNER_TEMP/certificate.p12"
           rm -f "$RUNNER_TEMP/app_profile.mobileprovision"
           rm -f "$RUNNER_TEMP/keyboard_profile.mobileprovision"
+          rm -f "$RUNNER_TEMP/widget_profile.mobileprovision"
           rm -rf ~/Library/MobileDevice/Provisioning\ Profiles/
           rm -rf ~/.private_keys/

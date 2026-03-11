@@ -1,5 +1,8 @@
 import Foundation
 import Combine
+#if canImport(ActivityKit)
+import ActivityKit
+#endif
 
 @MainActor
 final class ServiceContainer: ObservableObject {
@@ -17,6 +20,9 @@ final class ServiceContainer: ObservableObject {
     let snippetService: SnippetService
     let soundService: SoundService
     let flowSessionManager: FlowSessionManager
+    #if canImport(ActivityKit)
+    let liveActivityService: LiveActivityService
+    #endif
 
     // ViewModels
     let modelManagerViewModel: ModelManagerViewModel
@@ -42,6 +48,9 @@ final class ServiceContainer: ObservableObject {
         snippetService = SnippetService()
         soundService = SoundService()
         flowSessionManager = FlowSessionManager()
+        #if canImport(ActivityKit)
+        liveActivityService = LiveActivityService()
+        #endif
 
         // ViewModels
         modelManagerViewModel = ModelManagerViewModel(modelManager: modelManagerService)
@@ -73,6 +82,32 @@ final class ServiceContainer: ObservableObject {
         snippetsViewModel = SnippetsViewModel(snippetService: snippetService)
         homeViewModel = HomeViewModel(historyService: historyService)
 
+        // Wire Live Activity
+        #if canImport(ActivityKit)
+        recordingViewModel.liveActivityService = liveActivityService
+        liveActivityService.durationProvider = { [weak recordingViewModel] in
+            recordingViewModel?.recordingDuration ?? 0
+        }
+        liveActivityService.audioLevelProvider = { [weak recordingViewModel] in
+            recordingViewModel?.audioLevel ?? 0
+        }
+        liveActivityService.isRecordingProvider = { [weak recordingViewModel] in
+            recordingViewModel?.state == .recording
+        }
+
+        StopRecordingLiveActivityIntent.handler = { [weak recordingViewModel] in
+            recordingViewModel?.stopRecording()
+        }
+        TogglePauseLiveActivityIntent.handler = { [weak recordingViewModel] in
+            guard let vm = recordingViewModel else { return }
+            if vm.state == .paused {
+                vm.resumeRecording()
+            } else if vm.state == .recording {
+                vm.pauseRecording()
+            }
+        }
+        #endif
+
         // Set shared references
         ModelManagerViewModel._shared = modelManagerViewModel
         FileTranscriptionViewModel._shared = fileTranscriptionViewModel
@@ -83,7 +118,6 @@ final class ServiceContainer: ObservableObject {
         DictionaryViewModel._shared = dictionaryViewModel
         SnippetsViewModel._shared = snippetsViewModel
         HomeViewModel._shared = homeViewModel
-
     }
 
     func initialize() async {

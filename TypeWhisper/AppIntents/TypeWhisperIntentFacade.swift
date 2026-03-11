@@ -79,7 +79,7 @@ final class TypeWhisperIntentFacade {
     func stopRecording(timeout: Duration = .seconds(20)) async throws -> IntentTranscriptionPayload {
         try await ensureInitialized()
 
-        guard container.recordingViewModel.state == .recording else {
+        guard container.recordingViewModel.state == .recording || container.recordingViewModel.state == .paused else {
             throw IntentError.notRecording
         }
 

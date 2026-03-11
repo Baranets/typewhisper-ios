@@ -18,6 +18,7 @@ final class RecordingViewModel: ObservableObject {
     enum State: Equatable {
         case idle
         case recording
+        case paused
         case processing
         case done(String)
         case error(String)
@@ -47,10 +48,14 @@ final class RecordingViewModel: ObservableObject {
     private let dictionaryService: DictionaryService
     private let snippetService: SnippetService
     private let soundService: SoundService
+    #if canImport(ActivityKit)
+    var liveActivityService: LiveActivityService?
+    #endif
 
     private var cancellables = Set<AnyCancellable>()
     private var recordingTimer: Timer?
     private var recordingStartTime: Date?
+    private var pausedDuration: TimeInterval = 0
     private var streamingTask: Task<Void, Never>?
     private var silenceCancellable: AnyCancellable?
 
@@ -121,10 +126,14 @@ final class RecordingViewModel: ObservableObject {
             soundService.play(.recordingStarted, enabled: soundFeedbackEnabled)
             partialText = ""
             lastResult = ""
+            pausedDuration = 0
             recordingStartTime = Date()
             startRecordingTimer()
             startStreamingIfSupported()
             startSilenceDetection()
+            #if canImport(ActivityKit)
+            liveActivityService?.startActivity()
+            #endif
         } catch {
             soundService.play(.error, enabled: soundFeedbackEnabled)
             showError(error.localizedDescription)
@@ -132,11 +141,15 @@ final class RecordingViewModel: ObservableObject {
     }
 
     func stopRecording() {
-        guard state == .recording else { return }
+        guard state == .recording || state == .paused else { return }
 
         stopStreaming()
         stopSilenceDetection()
         stopRecordingTimer()
+        pausedDuration = 0
+        #if canImport(ActivityKit)
+        liveActivityService?.endActivity()
+        #endif
         let samples = audioRecordingService.stopRecording()
 
         guard !samples.isEmpty else {
@@ -216,8 +229,83 @@ final class RecordingViewModel: ObservableObject {
         }
     }
 
+    func pauseRecording() {
+        guard state == .recording else { return }
+
+        // Snapshot elapsed time
+        if let start = recordingStartTime {
+            pausedDuration += Date().timeIntervalSince(start)
+        }
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+
+        stopSilenceDetection()
+        stopStreaming()
+        audioRecordingService.pauseRecording()
+        soundService.play(.recordingPaused, enabled: soundFeedbackEnabled)
+        #if canImport(ActivityKit)
+        liveActivityService?.updateActivity(isRecording: false)
+        liveActivityService?.stopPeriodicUpdates()
+        #endif
+        state = .paused
+    }
+
+    func resumeRecording() {
+        guard state == .paused else { return }
+
+        audioRecordingService.resumeRecording()
+        recordingStartTime = Date()
+        startRecordingTimer()
+        startSilenceDetection()
+        startStreamingIfSupported()
+        soundService.play(.recordingResumed, enabled: soundFeedbackEnabled)
+        #if canImport(ActivityKit)
+        liveActivityService?.updateActivity(isRecording: true)
+        liveActivityService?.startPeriodicUpdates()
+        #endif
+        state = .recording
+    }
+
+    func cancelRecording() {
+        guard state == .recording || state == .paused else { return }
+
+        stopStreaming()
+        stopSilenceDetection()
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        recordingDuration = 0
+        pausedDuration = 0
+        partialText = ""
+        audioRecordingService.cancelRecording()
+        #if canImport(ActivityKit)
+        liveActivityService?.endActivity()
+        #endif
+        state = .idle
+    }
+
+    func restartRecording() {
+        guard state == .recording || state == .paused else { return }
+
+        stopStreaming()
+        stopSilenceDetection()
+        audioRecordingService.restartRecording()
+
+        pausedDuration = 0
+        recordingDuration = 0
+        partialText = ""
+        confirmedStreamingText = ""
+        recordingStartTime = Date()
+
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        startRecordingTimer()
+        startStreamingIfSupported()
+        startSilenceDetection()
+        state = .recording
+    }
+
     func toggleRecording() {
-        if state == .recording {
+        if state == .recording || state == .paused {
             stopRecording()
         } else if state == .idle || state == .done("") || isDoneState {
             startRecording()
@@ -261,7 +349,7 @@ final class RecordingViewModel: ObservableObject {
             switch state {
             case .done, .error, .idle:
                 return state
-            case .recording, .processing:
+            case .recording, .paused, .processing:
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
@@ -406,11 +494,11 @@ final class RecordingViewModel: ObservableObject {
     // MARK: - Timer
 
     private func startRecordingTimer() {
-        recordingDuration = 0
+        recordingDuration = pausedDuration
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let start = self.recordingStartTime else { return }
-                self.recordingDuration = Date().timeIntervalSince(start)
+                self.recordingDuration = self.pausedDuration + Date().timeIntervalSince(start)
             }
         }
     }
@@ -418,7 +506,6 @@ final class RecordingViewModel: ObservableObject {
     private func stopRecordingTimer() {
         recordingTimer?.invalidate()
         recordingTimer = nil
-        recordingDuration = 0
     }
 
     private func showError(_ message: String) {

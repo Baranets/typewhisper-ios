@@ -2,12 +2,16 @@ import AVFoundation
 
 enum SoundEvent {
     case recordingStarted
+    case recordingPaused
+    case recordingResumed
     case transcriptionSuccess
     case error
 
     var fileName: String {
         switch self {
         case .recordingStarted: return "recording_start"
+        case .recordingPaused: return "recording_start"
+        case .recordingResumed: return "recording_start"
         case .transcriptionSuccess: return "transcription_success"
         case .error: return "error"
         }
@@ -31,7 +35,7 @@ class SoundService {
     }
 
     private func preloadSounds() {
-        for event in [SoundEvent.recordingStarted, .transcriptionSuccess, .error] {
+        for event in [SoundEvent.recordingStarted, .recordingPaused, .recordingResumed, .transcriptionSuccess, .error] {
             if let url = Bundle.main.url(forResource: event.fileName, withExtension: "wav") {
                 players[event] = try? AVAudioPlayer(contentsOf: url)
                 players[event]?.prepareToPlay()

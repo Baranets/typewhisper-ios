@@ -8,6 +8,10 @@ struct RecordView: View {
     @State private var keyboardActivated = false
     @State private var keyboardHasFullAccess = false
 
+    private var isActiveRecording: Bool {
+        viewModel.state == .recording || viewModel.state == .paused
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -20,7 +24,8 @@ struct RecordView: View {
 
                 // Microphone Button
                 MicrophoneButton(
-                    isRecording: viewModel.state == .recording,
+                    isRecording: isActiveRecording,
+                    isPaused: viewModel.state == .paused,
                     audioLevel: viewModel.audioLevel
                 ) {
                     viewModel.toggleRecording()
@@ -28,11 +33,17 @@ struct RecordView: View {
                 .padding(.bottom, 8)
 
                 // Recording duration
-                if viewModel.state == .recording {
+                if isActiveRecording {
                     Text(formatDuration(viewModel.recordingDuration))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
+                }
+
+                // Recording controls
+                if isActiveRecording {
+                    recordingControls
+                        .padding(.top, 16)
                 }
 
                 Spacer()
@@ -78,9 +89,67 @@ struct RecordView: View {
     }
 
     @ViewBuilder
+    private var recordingControls: some View {
+        HStack(spacing: 32) {
+            // Cancel
+            Button {
+                viewModel.cancelRecording()
+            } label: {
+                Image(systemName: "xmark.circle")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+            }
+            .sensoryFeedback(.impact(weight: .light), trigger: viewModel.state)
+
+            // Pause / Resume
+            Button {
+                if viewModel.state == .paused {
+                    viewModel.resumeRecording()
+                } else {
+                    viewModel.pauseRecording()
+                }
+            } label: {
+                Image(systemName: viewModel.state == .paused ? "play.circle.fill" : "pause.circle.fill")
+                    .font(.title)
+                    .foregroundStyle(viewModel.state == .paused ? .green : .orange)
+            }
+            .sensoryFeedback(.impact(weight: .medium), trigger: viewModel.state)
+
+            // Restart
+            Button {
+                viewModel.restartRecording()
+            } label: {
+                Image(systemName: "arrow.counterclockwise.circle")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+            }
+            .sensoryFeedback(.impact(weight: .light), trigger: viewModel.state)
+        }
+    }
+
+    @ViewBuilder
     private var statusSection: some View {
         if viewModel.state == .processing {
             EmptyView()
+        } else if viewModel.state == .paused, !viewModel.partialText.isEmpty {
+            VStack(spacing: 8) {
+                Text("Paused")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .textCase(.uppercase)
+                ScrollView {
+                    Text(viewModel.partialText)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+                .frame(maxHeight: 200)
+            }
+        } else if viewModel.state == .paused {
+            Text("Paused")
+                .font(.headline)
+                .foregroundStyle(.orange)
         } else if viewModel.state == .recording, !viewModel.partialText.isEmpty {
             ScrollView {
                 Text(viewModel.partialText)
