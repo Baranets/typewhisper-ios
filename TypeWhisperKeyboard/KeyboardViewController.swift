@@ -85,6 +85,26 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func reportFullAccessStatus() {
+        guard let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: TypeWhisperConstants.appGroupIdentifier
+        ) else { return }
+
+        // Capability-based check as backup
+        let systemFullAccess = hasFullAccess
+        let canAccessPasteboard = UIPasteboard.general.hasStrings || UIPasteboard.general.string != nil || systemFullAccess
+
+        let status: [String: Any] = [
+            "hasFullAccess": systemFullAccess || canAccessPasteboard,
+            "systemProperty": systemFullAccess,
+            "timestamp": Date().timeIntervalSince1970
+        ]
+
+        let fileURL = groupURL.appending(path: TypeWhisperConstants.SharedFiles.keyboardStatusFile)
+        if let data = try? JSONSerialization.data(withJSONObject: status) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+
+        // Legacy UserDefaults for backwards compatibility
         if let defaults = UserDefaults(suiteName: TypeWhisperConstants.appGroupIdentifier) {
             defaults.set(hasFullAccess, forKey: TypeWhisperConstants.SharedDefaults.keyboardHasFullAccess)
             defaults.set(Date().timeIntervalSince1970, forKey: TypeWhisperConstants.SharedDefaults.keyboardLastCheckedAt)

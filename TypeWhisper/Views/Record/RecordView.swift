@@ -281,8 +281,19 @@ struct RecordView: View {
         } else {
             keyboardActivated = false
         }
-        guard let defaults = UserDefaults(suiteName: TypeWhisperConstants.appGroupIdentifier) else { return }
-        defaults.synchronize()
-        keyboardHasFullAccess = defaults.bool(forKey: TypeWhisperConstants.SharedDefaults.keyboardHasFullAccess)
+        // Full access: file-based read
+        guard let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: TypeWhisperConstants.appGroupIdentifier
+        ) else { return }
+
+        let fileURL = groupURL.appending(path: TypeWhisperConstants.SharedFiles.keyboardStatusFile)
+        guard let data = try? Data(contentsOf: fileURL),
+              let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let hasAccess = status["hasFullAccess"] as? Bool else {
+            // No status file = keyboard never reported = assume optimistically
+            keyboardHasFullAccess = keyboardActivated
+            return
+        }
+        keyboardHasFullAccess = hasAccess
     }
 }

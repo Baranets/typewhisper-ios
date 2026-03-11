@@ -7,6 +7,7 @@ enum TypeWhisperConstants {
     enum SharedFiles {
         static let keyboardHistoryFile = "keyboard_history.json"
         static let keyboardProfilesFile = "keyboard_profiles.json"
+        static let keyboardStatusFile = "keyboard_status.json"
     }
 
     enum SharedDefaults {
