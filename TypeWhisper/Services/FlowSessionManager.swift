@@ -36,6 +36,38 @@ private func calculateFlowAudioLevels(from buffer: AVAudioPCMBuffer, barCount: I
     return levels
 }
 
+/// Thread-safe accumulator for 16kHz mono Float samples (batch transcription with Whisper/Parakeet)
+private final class FlowAudioSampleBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _samples: [Float] = []
+
+    var isEmpty: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _samples.isEmpty
+    }
+
+    func append(_ samples: [Float]) {
+        lock.lock()
+        _samples.append(contentsOf: samples)
+        lock.unlock()
+    }
+
+    func drain() -> [Float] {
+        lock.lock()
+        let result = _samples
+        _samples = []
+        lock.unlock()
+        return result
+    }
+
+    func clear() {
+        lock.lock()
+        _samples = []
+        lock.unlock()
+    }
+}
+
 /// Thread-safe holder for the active recognition request — allows audio tap to append buffers
 private final class FlowRecognitionState: @unchecked Sendable {
     private let lock = NSLock()
@@ -76,7 +108,10 @@ private func installFlowAudioTap(
     format: AVAudioFormat,
     recordingFlag: OSAllocatedUnfairLock<Bool>,
     defaults: UserDefaults?,
-    recognitionState: FlowRecognitionState
+    recognitionState: FlowRecognitionState,
+    sampleBuffer: FlowAudioSampleBuffer,
+    converter: AVAudioConverter?,
+    targetFormat: AVAudioFormat?
 ) {
     inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
         // Always write audio levels for keyboard visualization
@@ -90,6 +125,39 @@ private func installFlowAudioTap(
         guard currentlyRecording else { return }
 
         recognitionState.appendBuffer(buffer)
+
+        // Also resample to 16kHz mono for batch transcription (Whisper/Parakeet)
+        if let converter, let targetFormat {
+            let frameCount = AVAudioFrameCount(
+                Double(buffer.frameLength) * 16000.0 / buffer.format.sampleRate
+            )
+            guard frameCount > 0,
+                  let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCount)
+            else { return }
+
+            var error: NSError?
+            let consumed = OSAllocatedUnfairLock(initialState: false)
+            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+                let wasConsumed = consumed.withLock { flag in
+                    let prev = flag
+                    flag = true
+                    return prev
+                }
+                if wasConsumed {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                outStatus.pointee = .haveData
+                return buffer
+            }
+
+            guard error == nil, convertedBuffer.frameLength > 0,
+                  let channelData = convertedBuffer.floatChannelData?[0]
+            else { return }
+
+            let samples = Array(UnsafeBufferPointer(start: channelData, count: Int(convertedBuffer.frameLength)))
+            sampleBuffer.append(samples)
+        }
     }
 }
 
@@ -114,12 +182,15 @@ class FlowSessionManager: ObservableObject {
 
     private let isRecordingAtomic = OSAllocatedUnfairLock(initialState: false)
     private let recognitionState = FlowRecognitionState()
+    private let sampleAccumulator = FlowAudioSampleBuffer()
     private var recognitionTask: SFSpeechRecognitionTask?
     private var recognitionTimeoutWork: DispatchWorkItem?
     private var recognitionGeneration = 0
     private var appendedBufferCount = 0
+    private weak var modelManager: ModelManagerService?
 
-    init() {
+    init(modelManager: ModelManagerService? = nil) {
+        self.modelManager = modelManager
         checkExistingSession()
     }
 
@@ -240,18 +311,36 @@ class FlowSessionManager: ObservableObject {
         guard let engine = audioEngine else { return }
 
         let inputNode = engine.inputNode
+        engine.prepare()
         let format = inputNode.outputFormat(forBus: 0)
+
+        logger.info("[FLOW] Input format: sr=\(format.sampleRate) ch=\(format.channelCount)")
+
+        // Create converter for 16kHz mono resampling (batch transcription)
+        let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16000,
+            channels: 1,
+            interleaved: false
+        )
+        var converter: AVAudioConverter?
+        if let targetFormat, format.sampleRate > 0, format.channelCount > 0 {
+            converter = AVAudioConverter(from: format, to: targetFormat)
+        }
+        logger.info("[FLOW] Converter created: \(converter != nil)")
 
         installFlowAudioTap(
             on: inputNode,
             format: format,
             recordingFlag: isRecordingAtomic,
             defaults: sharedDefaults,
-            recognitionState: recognitionState
+            recognitionState: recognitionState,
+            sampleBuffer: sampleAccumulator,
+            converter: converter,
+            targetFormat: targetFormat
         )
 
         do {
-            engine.prepare()
             try engine.start()
         } catch {
             logger.error("Failed to start audio engine: \(error)")
@@ -273,6 +362,16 @@ class FlowSessionManager: ObservableObject {
         recognitionGeneration += 1
         let currentGeneration = recognitionGeneration
         logger.info("[REC] startRecognition gen=\(currentGeneration)")
+
+        sampleAccumulator.clear()
+
+        // Check if a local model (Whisper/Parakeet) is loaded - use batch mode
+        if let engine = modelManager?.activeEngine,
+           engine.isModelLoaded,
+           engine.engineType != .appleSpeech {
+            logger.info("[REC] Using batch mode with \(engine.engineType.rawValue) engine")
+            return
+        }
 
         let language = sharedDefaults?.string(forKey: TypeWhisperConstants.SharedDefaults.transcriptionLanguage)
         let effectiveLanguage = (language == "auto") ? nil : language
@@ -390,6 +489,89 @@ class FlowSessionManager: ObservableObject {
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionState.set(nil)
+        sampleAccumulator.clear()
+    }
+
+    private func performBatchTranscription() {
+        let samples = sampleAccumulator.drain()
+        guard !samples.isEmpty else {
+            sharedDefaults?.set("No audio recorded", forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
+            sharedDefaults?.set("idle", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
+            sharedDefaults?.synchronize()
+            return
+        }
+
+        guard let engine = modelManager?.activeEngine, engine.isModelLoaded else {
+            sharedDefaults?.set("Model not loaded", forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
+            sharedDefaults?.set("idle", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
+            sharedDefaults?.synchronize()
+            return
+        }
+
+        let language = sharedDefaults?.string(forKey: TypeWhisperConstants.SharedDefaults.transcriptionLanguage)
+        let effectiveLanguage: String?
+        if let language, language != "auto" {
+            // Keyboard writes locale codes like "de-DE" but Whisper expects "de"
+            effectiveLanguage = language.components(separatedBy: "-").first ?? language
+        } else {
+            effectiveLanguage = nil
+        }
+
+        logger.info("[REC] Batch transcription: \(samples.count) samples (\(String(format: "%.1f", Double(samples.count) / 16000.0))s)")
+
+        let generation = recognitionGeneration
+
+        // Timeout after 30s
+        let timeout = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.recognitionGeneration == generation else { return }
+                self.logger.warning("[REC] Batch TIMEOUT after 30s")
+                self.sharedDefaults?.set("Transcription timed out", forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
+                self.sharedDefaults?.set("idle", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
+                self.sharedDefaults?.synchronize()
+            }
+        }
+        recognitionTimeoutWork = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeout)
+
+        logger.info("[REC] Batch transcription: \(samples.count) samples (\(String(format: "%.1f", Double(samples.count) / 16000.0))s) lang=\(effectiveLanguage ?? "auto")")
+
+        Task { [weak self] in
+            do {
+                let result = try await engine.transcribe(
+                    audioSamples: samples,
+                    language: effectiveLanguage,
+                    task: .transcribe
+                )
+                await MainActor.run {
+                    guard let self, self.recognitionGeneration == generation else { return }
+                    self.recognitionTimeoutWork?.cancel()
+                    self.recognitionTimeoutWork = nil
+
+                    let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if text.isEmpty {
+                        self.sharedDefaults?.set("No text recognized", forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
+                    } else {
+                        self.lastTranscription = text
+                        self.sharedDefaults?.set(text, forKey: TypeWhisperConstants.SharedDefaults.transcriptionResult)
+                        self.sharedDefaults?.removeObject(forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
+                    }
+                    self.sharedDefaults?.set("idle", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
+                    self.sharedDefaults?.synchronize()
+                    self.logger.info("[REC] Batch result: \(text.prefix(80))")
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self, self.recognitionGeneration == generation else { return }
+                    self.recognitionTimeoutWork?.cancel()
+                    self.recognitionTimeoutWork = nil
+                    self.logger.error("[REC] Batch error: \(error.localizedDescription)")
+                    self.sharedDefaults?.set(error.localizedDescription, forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
+                    self.sharedDefaults?.set("idle", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
+                    self.sharedDefaults?.synchronize()
+                }
+            }
+        }
     }
 
     // MARK: - Keyboard Signal Polling
@@ -421,7 +603,10 @@ class FlowSessionManager: ObservableObject {
 
         case "stopped":
             let buffers = recognitionState.bufferCount
-            logger.info("[FLOW] signal=stopped isRecording=\(self.isRecording) buffers=\(buffers) task=\(self.recognitionTask != nil)")
+            let hasSamples = !sampleAccumulator.isEmpty
+            let hasEngine = modelManager?.activeEngine != nil
+            let engineType = modelManager?.activeEngine?.engineType.rawValue ?? "none"
+            logger.info("[FLOW] signal=stopped isRecording=\(self.isRecording) buffers=\(buffers) task=\(self.recognitionTask != nil) samples=\(hasSamples) engine=\(engineType)")
 
             isRecording = false
             isRecordingAtomic.withLock { $0 = false }
@@ -431,9 +616,11 @@ class FlowSessionManager: ObservableObject {
 
             if recognitionTask != nil || recognitionState.request != nil {
                 stopRecognition()
+            } else if !sampleAccumulator.isEmpty {
+                performBatchTranscription()
             } else {
                 // No active recognition - respond immediately so keyboard doesn't hang
-                logger.warning("[FLOW] stopped but no active recognition - responding with error")
+                logger.warning("[FLOW] stopped but no active recognition")
                 sharedDefaults?.set("Recognition not active", forKey: TypeWhisperConstants.SharedDefaults.transcriptionError)
                 sharedDefaults?.set("idle", forKey: TypeWhisperConstants.SharedDefaults.keyboardRecordingState)
                 sharedDefaults?.synchronize()
@@ -441,6 +628,7 @@ class FlowSessionManager: ObservableObject {
 
         case "aborted":
             logger.info("[FLOW] signal=aborted isRecording=\(self.isRecording)")
+            sampleAccumulator.clear()
             cancelRecognition()
             isRecording = false
             isRecordingAtomic.withLock { $0 = false }

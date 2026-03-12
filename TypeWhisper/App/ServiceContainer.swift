@@ -47,7 +47,7 @@ final class ServiceContainer: ObservableObject {
         dictionaryService = DictionaryService()
         snippetService = SnippetService()
         soundService = SoundService()
-        flowSessionManager = FlowSessionManager()
+        flowSessionManager = FlowSessionManager(modelManager: modelManagerService)
         #if canImport(ActivityKit)
         liveActivityService = LiveActivityService()
         #endif
