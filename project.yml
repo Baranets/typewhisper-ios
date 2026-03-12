@@ -35,6 +35,9 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MARKETING_VERSION: 0.1
         CURRENT_PROJECT_VERSION: 1
+      configs:
+        Release:
+          PROVISIONING_PROFILE_SPECIFIER: $(TW_APP_PROFILE)
     dependencies:
       - package: WhisperKit
       - package: FluidAudio
@@ -55,6 +58,9 @@ targets:
         MARKETING_VERSION: 0.1
         CURRENT_PROJECT_VERSION: 1
         SKIP_INSTALL: true
+      configs:
+        Release:
+          PROVISIONING_PROFILE_SPECIFIER: $(TW_WG_PROFILE)
 
   TypeWhisperKeyboard:
     type: app-extension
@@ -70,6 +76,9 @@ targets:
         MARKETING_VERSION: 0.1
         CURRENT_PROJECT_VERSION: 1
         SKIP_INSTALL: true
+      configs:
+        Release:
+          PROVISIONING_PROFILE_SPECIFIER: $(TW_KB_PROFILE)
 
 schemes:
   TypeWhisper:

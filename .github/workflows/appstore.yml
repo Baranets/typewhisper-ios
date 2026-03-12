@@ -122,6 +122,9 @@ jobs:
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM=2D8ALY3LCL \
             CODE_SIGN_IDENTITY="Apple Distribution" \
+            TW_APP_PROFILE="$APP_PROFILE_NAME" \
+            TW_KB_PROFILE="$KB_PROFILE_NAME" \
+            TW_WG_PROFILE="$WG_PROFILE_NAME" \
             MARKETING_VERSION="${{ inputs.version }}" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
 
