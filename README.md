@@ -82,6 +82,12 @@ Speech-to-text for iPhone. Transcribe audio using on-device AI models (WhisperKi
 
 5. Run on a device or simulator. Go to Settings > Models to download a transcription model.
 
+## Releases / Sideloading
+
+- Official GitHub releases are triggered by pushing a tag in the `vX.Y.Z` format, for example `v0.2.8`
+- Each release publishes a signed `.ipa` asset for AltStore and Sideloadly
+- The release `.ipa` is intended for sideloading and is separate from the App Store Connect upload flow
+
 ### Keyboard Setup
 
 1. Open **Settings > General > Keyboard > Keyboards > Add New Keyboard**
